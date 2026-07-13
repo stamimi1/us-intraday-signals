@@ -1,0 +1,122 @@
+# =============================================================================
+# US Intraday Strategy Engine - Configuration
+# No secrets here. Telegram credentials come from env vars / repo secrets.
+# =============================================================================
+
+# Liquid, high-volume universe. Curated (not "movers") on purpose: intraday
+# strategies need tight spreads and clean bars; a fixed liquid set cuts noise.
+universe:
+  - SPY
+  - QQQ
+  - IWM
+  - SMH
+  - XLE
+  - XLF
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - META
+  - GOOGL
+  - TSLA
+  - AVGO
+  - AMD
+  - NFLX
+  - INTC
+  - MU
+  - PLTR
+  - COIN
+  - MSTR
+  - HOOD
+  - SOFI
+  - RIVN
+  - MARA
+  - UBER
+  - SHOP
+  - PYPL
+  - ABNB
+  - BA
+  - DIS
+  - JPM
+  - BAC
+  - XOM
+  - CVX
+  - WMT
+  - UNH
+  - LLY
+  - V
+  - ORCL
+  - CRM
+
+# Trading intervals computed every cycle. The dashboard lets you pick which
+# one to view; each strategy only runs on the intervals it's designed for.
+intervals: ["5m", "15m", "1h", "4h"]
+
+strategies:
+  orb:                      # Opening Range Breakout
+    intervals: ["5m", "15m"]
+    opening_range_minutes: 15
+    volume_confirm_mult: 1.2      # trigger bar volume vs prior-10-bar average
+    max_chase_atr: 0.5            # skip if close is already this far past the level
+    last_entry_et: "15:00"        # no new entries after this ET time
+    reward_r: 2.0
+  vwap_reversion:           # VWAP band fade
+    intervals: ["5m", "15m"]
+    band_sigma: 2.0
+    min_bars: 12                  # bars into the session before VWAP is trusted
+    skip_first_minutes: 30
+    stop_atr: 1.2
+  ema_cross:                # 9/21 EMA cross with 200-EMA trend filter
+    intervals: ["15m", "1h", "4h"]
+    fast: 9
+    slow: 21
+    trend: 200
+    swing_lookback: 10
+    stop_atr_cap: 2.0
+    stop_atr_floor: 0.75
+    reward_r: 2.0
+    time_stop_bars: 30
+  rsi2:                     # Connors RSI-2 pullback
+    intervals: ["1h", "4h"]
+    rsi_period: 2
+    long_below: 10
+    short_above: 90
+    trend_ma: 200
+    stop_atr: 2.0
+    target_atr: 1.5
+    time_stop_bars: 10
+  squeeze:                  # Bollinger/Keltner squeeze release breakout
+    intervals: ["15m", "1h", "4h"]
+    bb_window: 20
+    bb_std: 2.0
+    kc_window: 20
+    kc_mult: 1.5
+    min_squeeze_bars: 6
+    momentum_window: 12
+    stop_atr: 1.5
+    reward_r: 2.0
+    time_stop_bars: 20
+
+risk:
+  atr_period: 14
+  min_risk_pct: 0.1     # skip degenerate signals with stop < 0.1% from entry
+
+ledger:
+  max_open_total: 60
+  keep_closed: 6000    # most recent closed trades kept in the file
+  rolling_window: 20    # trades used for the "is it still working" health check
+
+notify:
+  telegram:
+    enabled: true
+    bot_token_env: TELEGRAM_BOT_TOKEN
+    chat_id_env: TELEGRAM_CHAT_ID
+    max_per_cycle: 8    # hard cap so a volatile day can't flood the chat
+
+output:
+  live_dir: live        # JSON written here, force-pushed to the data-live branch
+
+market_hours:
+  timezone: America/New_York
+  open: "09:30"
+  close: "16:00"

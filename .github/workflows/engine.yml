@@ -1,0 +1,82 @@
+name: Intraday Engine
+
+on:
+  schedule:
+    # Every 30 min through US market hours (13:30-20:00 UTC spans DST shift).
+    # Each job then loops internally at ~1-minute cadence for up to 28 minutes,
+    # so back-to-back scheduled jobs give near-continuous 1-min updates even
+    # though GitHub's scheduler itself is coarse. Minutes 7/37 dodge the
+    # top-of-hour scheduler congestion.
+    - cron: "7,37 13-20 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      replay:
+        description: "Run replay backfill instead of live loop"
+        type: boolean
+        default: false
+
+concurrency:
+  group: engine
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 29
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore ledger state from data-live branch
+        run: |
+          mkdir -p live
+          git fetch origin data-live --depth 1 2>/dev/null && \
+            git show origin/data-live:ledger.json > live/ledger.json 2>/dev/null && \
+            echo "ledger restored" || echo "no prior ledger (first run)"
+
+      - name: Replay backfill (manual only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.replay }}
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: python engine.py --replay
+
+      - name: Engine loop (~1-min cadence for up to 27 min)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.replay) }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          for i in $(seq 1 27); do
+            started=$(date +%s)
+            python engine.py || echo "cycle $i failed; continuing"
+            bash .github/publish_data.sh || echo "publish $i failed; continuing"
+            # stop looping once the market is closed (one final pass already ran,
+            # which settles end-of-day exits in the ledger)
+            python - <<'EOF' || break
+          import sys, yaml, data_feed
+          cfg = yaml.safe_load(open("config.yaml"))
+          sys.exit(0 if data_feed.market_open(cfg) else 1)
+          EOF
+            elapsed=$(( $(date +%s) - started ))
+            [ $elapsed -lt 60 ] && sleep $(( 60 - elapsed ))
+          done
+
+      - name: Publish final state
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/publish_data.sh || true

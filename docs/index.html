@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Signals">
+<title>US Intraday Signals</title>
+<style>
+  :root {
+    --bg:#0b0e14; --card:#151a24; --card2:#1b2130; --text:#e8ecf3; --muted:#8b93a7;
+    --green:#22c55e; --red:#ef4444; --amber:#f59e0b; --blue:#3b82f6; --border:#252c3d;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         padding:env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 24px); max-width:640px; margin:0 auto; }
+  header { display:flex; align-items:center; justify-content:space-between; padding:14px 2px 10px; }
+  h1 { font-size:19px; font-weight:700; }
+  .status { font-size:12px; color:var(--muted); text-align:right; line-height:1.5; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; }
+  .tabs { display:flex; gap:8px; margin:6px 0 14px; }
+  .tab { flex:1; text-align:center; padding:10px 0; border-radius:12px; background:var(--card);
+         border:1px solid var(--border); font-size:15px; font-weight:600; color:var(--muted); cursor:pointer; }
+  .tab.active { background:var(--blue); color:#fff; border-color:var(--blue); }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:18px 2px 8px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:12px 14px; margin-bottom:10px; }
+  .sig-head { display:flex; justify-content:space-between; align-items:baseline; }
+  .sym { font-size:17px; font-weight:700; }
+  .dir-long { color:var(--green); font-weight:700; font-size:13px; }
+  .dir-short { color:var(--red); font-weight:700; font-size:13px; }
+  .strat { font-size:12px; color:var(--blue); margin-top:2px; }
+  .levels { display:flex; gap:14px; margin-top:8px; font-size:13px; }
+  .levels div span { display:block; color:var(--muted); font-size:11px; }
+  .reason { font-size:12px; color:var(--muted); margin-top:8px; line-height:1.45; }
+  .age { font-size:11px; color:var(--muted); }
+  .empty { text-align:center; color:var(--muted); padding:26px 10px; font-size:14px; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th { text-align:left; color:var(--muted); font-weight:600; padding:7px 6px; border-bottom:1px solid var(--border); }
+  td { padding:7px 6px; border-bottom:1px solid var(--border); }
+  tr:last-child td { border-bottom:none; }
+  .h-working { color:var(--green); } .h-flat { color:var(--amber); }
+  .h-degraded { color:var(--red); } .h-collecting { color:var(--muted); }
+  .pos-r { color:var(--green); } .neg-r { color:var(--red); }
+  .recent-row { display:flex; justify-content:space-between; padding:8px 2px; border-bottom:1px solid var(--border); font-size:13px; }
+  .recent-row:last-child { border-bottom:none; }
+  footer { margin-top:22px; font-size:11px; color:var(--muted); line-height:1.6; padding:0 2px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ US Intraday Signals</h1>
+  <div class="status" id="status">loading…</div>
+</header>
+
+<div class="tabs" id="tabs"></div>
+
+<h2>Fresh signals — <span id="ivLabel"></span></h2>
+<div id="signals"><div class="empty">Loading…</div></div>
+
+<h2>Strategy health (forward test)</h2>
+<div class="card" style="padding:6px 8px; overflow-x:auto;">
+  <table id="perf">
+    <thead><tr><th>Strategy</th><th>IV</th><th>N</th><th>Win%</th><th>Avg R</th><th>PF</th><th>Recent</th><th>Health</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<h2>Recent trades</h2>
+<div class="card" id="recent"></div>
+
+<footer>
+  Signals fire only on the trigger bar (entry · stop · target included). Health is scored from the
+  automated virtual-trade ledger in R multiples; “Recent” = rolling last-20 average R.
+  Backfill trades seed the stats; live forward-test counts grow daily.
+  Data via Yahoo Finance (may lag ~1 min). Educational tool — not financial advice.
+</footer>
+
+<script>
+const REPO = "stamimi1/us-intraday-signals";
+const LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
+const RAW = LOCAL ? "/live" : `https://raw.githubusercontent.com/${REPO}/refs/heads/data-live`;
+const INTERVALS = ["5m","15m","1h","4h"];
+let currentIv = localStorage.getItem("iv") || "15m";
+let labels = {};
+
+const tabsEl = document.getElementById("tabs");
+INTERVALS.forEach(iv => {
+  const b = document.createElement("div");
+  b.className = "tab" + (iv === currentIv ? " active" : "");
+  b.textContent = iv.toUpperCase();
+  b.onclick = () => { currentIv = iv; localStorage.setItem("iv", iv);
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    b.classList.add("active"); render(); };
+  tabsEl.appendChild(b);
+});
+
+let signalsData = null, perfData = null;
+
+function ago(iso) {
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 90) return `${Math.round(s)}s ago`;
+  if (s < 5400) return `${Math.round(s/60)}m ago`;
+  return `${(s/3600).toFixed(1)}h ago`;
+}
+
+function render() {
+  document.getElementById("ivLabel").textContent = currentIv.toUpperCase();
+  const sigEl = document.getElementById("signals");
+  if (!signalsData) return;
+  labels = signalsData.labels || {};
+
+  const open = signalsData.market_open;
+  document.getElementById("status").innerHTML =
+    `<span class="dot" style="background:${open ? "var(--green)" : "var(--muted)"}"></span>` +
+    `${open ? "market open" : "market closed"}<br>updated ${ago(signalsData.updated_at)}`;
+
+  const sigs = (signalsData.by_interval?.[currentIv] || []);
+  if (!sigs.length) {
+    sigEl.innerHTML = `<div class="empty">No fresh ${currentIv} signals on the latest bar.<br>
+      That means no strategy has a valid entry right now — silence is a feature.</div>`;
+  } else {
+    sigEl.innerHTML = sigs.map(s => `
+      <div class="card">
+        <div class="sig-head">
+          <div><span class="sym">${s.symbol}</span>
+            <span class="${s.direction === "long" ? "dir-long" : "dir-short"}"> ${s.direction.toUpperCase()}</span>
+            <div class="strat">${labels[s.strategy] || s.strategy}</div></div>
+          <div class="age">${ago(s.bar_time)}</div>
+        </div>
+        <div class="levels">
+          <div><span>Entry</span><b>${s.entry}</b></div>
+          <div><span>Stop</span><b style="color:var(--red)">${s.stop}</b></div>
+          <div><span>Target</span><b style="color:var(--green)">${s.target}</b></div>
+          <div><span>R:R</span><b>${(Math.abs(s.target - s.entry) / Math.abs(s.entry - s.stop)).toFixed(1)}</b></div>
+        </div>
+        <div class="reason">${s.reason}</div>
+      </div>`).join("");
+  }
+
+  if (perfData) {
+    const tb = document.querySelector("#perf tbody");
+    const rows = perfData.table.filter(r => r.interval === currentIv);
+    const all = rows.length ? rows : perfData.table;
+    tb.innerHTML = all.map(r => `
+      <tr><td>${(labels[r.strategy] || r.strategy).replace(" Breakout","").replace(" Cross","")}</td>
+        <td>${r.interval}</td><td>${r.trades}</td><td>${r.win_rate}</td>
+        <td class="${r.avg_r >= 0 ? "pos-r" : "neg-r"}">${r.avg_r}</td>
+        <td>${r.profit_factor}</td>
+        <td class="${r.recent_avg_r >= 0 ? "pos-r" : "neg-r"}">${r.recent_avg_r}</td>
+        <td class="h-${r.health}">${r.health}</td></tr>`).join("")
+      || `<tr><td colspan="8" class="empty">collecting…</td></tr>`;
+  }
+
+  const rec = (signalsData.recent || []).filter(t => t.interval === currentIv).slice(0, 12);
+  document.getElementById("recent").innerHTML = rec.length ? rec.map(t => `
+    <div class="recent-row">
+      <div><b>${t.symbol}</b> <span style="color:var(--muted)">${labels[t.strategy] || t.strategy} · ${t.direction}</span></div>
+      <div>${t.status === "open" ? '<span style="color:var(--blue)">open</span>'
+        : `<span class="${t.r >= 0 ? "pos-r" : "neg-r"}">${t.r > 0 ? "+" : ""}${t.r}R</span>
+           <span style="color:var(--muted)"> ${t.status}</span>`}</div>
+    </div>`).join("") : `<div class="empty">No trades yet for ${currentIv}.</div>`;
+}
+
+async function refresh() {
+  try {
+    const bust = `?nc=${Date.now()}`;
+    const [s, p] = await Promise.all([
+      fetch(`${RAW}/signals.json${bust}`).then(r => r.ok ? r.json() : null),
+      fetch(`${RAW}/performance.json${bust}`).then(r => r.ok ? r.json() : null),
+    ]);
+    if (s) signalsData = s;
+    if (p) perfData = p;
+    render();
+  } catch (e) {
+    document.getElementById("status").textContent = "fetch error — retrying";
+  }
+}
+refresh();
+setInterval(refresh, 60_000);   // your 1-minute update rate
+</script>
+</body>
+</html>
