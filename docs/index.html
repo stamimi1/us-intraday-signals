@@ -45,6 +45,19 @@
   .recent-row { display:flex; justify-content:space-between; padding:8px 2px; border-bottom:1px solid var(--border); font-size:13px; }
   .recent-row:last-child { border-bottom:none; }
   footer { margin-top:22px; font-size:11px; color:var(--muted); line-height:1.6; padding:0 2px; }
+  .actions { display:flex; gap:8px; margin:0 0 12px; }
+  .btn { flex:1; text-align:center; padding:11px 0; border-radius:12px; border:1px solid var(--border);
+         font-size:14px; font-weight:600; cursor:pointer; text-decoration:none; display:block; }
+  .btn-primary { background:var(--blue); color:#fff; border-color:var(--blue); }
+  .btn-ghost { background:var(--card); color:var(--text); }
+  .btn:active { opacity:.7; }
+  .btn.spin { opacity:.6; pointer-events:none; }
+  .toast { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 18px); transform:translateX(-50%);
+           background:var(--card2); border:1px solid var(--border); color:var(--text); padding:10px 18px;
+           border-radius:20px; font-size:13px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:9; }
+  .toast.show { opacity:1; }
+  .closed-note { background:var(--card2); border:1px solid var(--border); border-radius:10px; padding:8px 12px;
+                 font-size:12px; color:var(--amber); margin-bottom:12px; }
 </style>
 </head>
 <body>
@@ -53,7 +66,15 @@
   <div class="status" id="status">loading…</div>
 </header>
 
+<div class="actions">
+  <a class="btn btn-primary" id="refreshBtn">↻ Refresh now</a>
+  <a class="btn btn-ghost" id="runBtn" target="_blank" rel="noopener"
+     href="https://github.com/stamimi1/us-intraday-signals/actions/workflows/engine.yml">▶ Run engine</a>
+</div>
+
 <div class="tabs" id="tabs"></div>
+
+<div id="closedNote"></div>
 
 <h2>Fresh signals — <span id="ivLabel"></span></h2>
 <div id="signals"><div class="empty">Loading…</div></div>
@@ -75,11 +96,16 @@
   Backfill trades seed the stats; live forward-test counts grow daily.
   Data via Yahoo Finance (may lag ~1 min). Educational tool — not financial advice.
 </footer>
+<div class="toast" id="toast"></div>
 
 <script>
 const REPO = "stamimi1/us-intraday-signals";
 const LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
+// Auto-refresh uses the CDN (unlimited but ~5-min Fastly cache). The manual
+// "Refresh now" button uses the GitHub API, which is real-time (no CDN cache)
+// but rate-limited (~60 req/hr/IP) — perfect for an on-demand tap.
 const RAW = LOCAL ? "/live" : `https://raw.githubusercontent.com/${REPO}/refs/heads/data-live`;
+const API = `https://api.github.com/repos/${REPO}/contents`;
 const INTERVALS = ["5m","15m","1h","4h"];
 let currentIv = localStorage.getItem("iv") || "15m";
 let labels = {};
@@ -114,6 +140,18 @@ function render() {
   document.getElementById("status").innerHTML =
     `<span class="dot" style="background:${open ? "var(--green)" : "var(--muted)"}"></span>` +
     `${open ? "market open" : "market closed"}<br>updated ${ago(signalsData.updated_at)}`;
+
+  // When the market is closed, data is intentionally frozen at the last
+  // session — say so, so stale-looking timestamps aren't alarming.
+  const note = document.getElementById("closedNote");
+  if (!open) {
+    const staleH = (Date.now() - new Date(signalsData.updated_at).getTime()) / 3.6e6;
+    note.innerHTML = `<div class="closed-note">🌙 Market closed — showing last session's data`
+      + `${staleH > 1 ? ` (${staleH.toFixed(1)}h old, normal overnight)` : ""}. `
+      + `The engine resumes automatically at the next US open. Tap “Run engine” to force a refresh now.</div>`;
+  } else {
+    note.innerHTML = "";
+  }
 
   const sigs = (signalsData.by_interval?.[currentIv] || []);
   if (!sigs.length) {
@@ -162,20 +200,57 @@ function render() {
     </div>`).join("") : `<div class="empty">No trades yet for ${currentIv}.</div>`;
 }
 
-async function refresh() {
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+// CDN source (auto-refresh): unlimited, ~5-min cached.
+async function fetchCDN(name) {
+  const r = await fetch(`${RAW}/${name}?nc=${Date.now()}`, { cache: "no-store" });
+  return r.ok ? r.json() : null;
+}
+// API source (manual button): real-time, no CDN cache, rate-limited.
+async function fetchAPI(name) {
+  const r = await fetch(`${API}/${name}?ref=data-live`, {
+    cache: "no-store", headers: { "Accept": "application/vnd.github.raw" },
+  });
+  if (!r.ok) throw new Error(r.status === 403 ? "rate-limited" : `http ${r.status}`);
+  return r.json();
+}
+
+async function load(fetcher) {
+  const [s, p] = await Promise.all([fetcher("signals.json"), fetcher("performance.json")]);
+  if (s) signalsData = s;
+  if (p) perfData = p;
+  render();
+}
+
+async function refresh() {           // scheduled auto-refresh (CDN)
+  try { await load(fetchCDN); }
+  catch (e) { document.getElementById("status").textContent = "fetch error — retrying"; }
+}
+
+async function manualRefresh() {     // button: real-time via GitHub API
+  const btn = document.getElementById("refreshBtn");
+  btn.classList.add("spin"); btn.textContent = "↻ Refreshing…";
   try {
-    const bust = `?nc=${Date.now()}`;
-    const [s, p] = await Promise.all([
-      fetch(`${RAW}/signals.json${bust}`).then(r => r.ok ? r.json() : null),
-      fetch(`${RAW}/performance.json${bust}`).then(r => r.ok ? r.json() : null),
-    ]);
-    if (s) signalsData = s;
-    if (p) perfData = p;
-    render();
+    await load(fetchAPI);
+    toast(`Updated — data from ${ago(signalsData.updated_at)}`);
   } catch (e) {
-    document.getElementById("status").textContent = "fetch error — retrying";
+    try { await load(fetchCDN); toast("Updated (cached)"); }
+    catch { toast("Refresh failed — try again"); }
+  } finally {
+    btn.classList.remove("spin"); btn.textContent = "↻ Refresh now";
   }
 }
+
+document.getElementById("refreshBtn").onclick = manualRefresh;
+document.getElementById("runBtn").addEventListener("click", () => {
+  setTimeout(() => toast("Engine starting on GitHub — give it ~1-2 min, then tap Refresh"), 400);
+});
+
 refresh();
 setInterval(refresh, 60_000);   // your 1-minute update rate
 </script>
