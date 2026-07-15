@@ -16,6 +16,12 @@ def send_fresh_signals(signals: list, labels: dict, cfg: dict):
     tg = cfg["notify"]["telegram"]
     if not tg["enabled"] or not signals:
         return
+    # push only the intervals the user actually trades (dashboard shows all)
+    wanted = tg.get("intervals") or []
+    if wanted:
+        signals = [s for s in signals if s["interval"] in wanted]
+    if not signals:
+        return
     token = os.environ.get(tg["bot_token_env"])
     chat_id = os.environ.get(tg["chat_id_env"])
     if not token or not chat_id:

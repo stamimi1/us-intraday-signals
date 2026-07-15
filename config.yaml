@@ -112,6 +112,9 @@ notify:
     bot_token_env: TELEGRAM_BOT_TOKEN
     chat_id_env: TELEGRAM_CHAT_ID
     max_per_cycle: 8    # hard cap so a volatile day can't flood the chat
+    # Only push signals for these intervals (user trades 1h/4h only; the
+    # dashboard still shows every interval). Empty list = push all.
+    intervals: ["1h", "4h"]
 
 output:
   live_dir: live        # JSON written here, force-pushed to the data-live branch
